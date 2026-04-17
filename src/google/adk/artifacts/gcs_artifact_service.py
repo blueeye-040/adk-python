@@ -32,6 +32,7 @@ from typing import Union
 from google.genai import types
 from typing_extensions import override
 
+from . import artifact_util
 from ..errors.input_validation_error import InputValidationError
 from .base_artifact_service import ArtifactVersion
 from .base_artifact_service import BaseArtifactService
@@ -230,9 +231,21 @@ class GcsArtifactService(BaseArtifactService):
           content_type="text/plain",
       )
     elif artifact.file_data:
-      raise NotImplementedError(
-          "Saving artifact with file_data is not supported yet in"
-          " GcsArtifactService."
+      if not artifact.file_data.file_uri:
+        raise InputValidationError("Artifact file_data must have a file_uri.")
+      if artifact_util.is_artifact_ref(artifact):
+        if not artifact_util.parse_artifact_uri(artifact.file_data.file_uri):
+          raise InputValidationError(
+              f"Invalid artifact reference URI: {artifact.file_data.file_uri}"
+          )
+      # Store the URI as blob metadata; no content to upload.
+      blob.metadata = {
+          **(blob.metadata or {}),
+          "file_uri": artifact.file_data.file_uri,
+      }
+      blob.upload_from_string(
+          b"",
+          content_type=artifact.file_data.mime_type or None,
       )
     else:
       raise InputValidationError(
@@ -263,15 +276,25 @@ class GcsArtifactService(BaseArtifactService):
     blob_name = self._get_blob_name(
         app_name, user_id, filename, version, session_id
     )
-    blob = self.bucket.blob(blob_name)
+    blob = self.bucket.get_blob(blob_name)
+    if blob is None:
+      return None
+
+    # If the artifact was saved as a file_data URI reference, restore it.
+    if blob.metadata and "file_uri" in blob.metadata:
+      return types.Part(
+          file_data=types.FileData(
+              file_uri=blob.metadata["file_uri"],
+              mime_type=blob.content_type or None,
+          )
+      )
 
     artifact_bytes = blob.download_as_bytes()
     if not artifact_bytes:
       return None
-    artifact = types.Part.from_bytes(
+    return types.Part.from_bytes(
         data=artifact_bytes, mime_type=blob.content_type
     )
-    return artifact
 
   def _list_artifact_keys(
       self, app_name: str, user_id: str, session_id: Optional[str]
