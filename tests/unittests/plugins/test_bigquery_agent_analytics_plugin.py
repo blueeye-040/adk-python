@@ -7246,3 +7246,101 @@ class TestA2AInteractionLogging:
 
     await asyncio.sleep(0.05)
     assert mock_write_client.append_rows.call_count == 0
+
+
+# ================================================================
+# TEST CLASS: Dataset location handling (Issue #5476)
+# ================================================================
+class TestDatasetLocationHandling:
+  """Tests that BQ client is created without a default location.
+
+  When location is omitted from bigquery.Client(), client.query()
+  sends no location field in the API request, letting BigQuery
+  infer location from the referenced dataset.  This prevents
+  silent view-creation failures for non-US datasets.
+  """
+
+  @pytest.mark.asyncio
+  async def test_client_created_without_location(
+      self,
+      mock_auth_default,
+      mock_to_arrow_schema,
+      mock_asyncio_to_thread,
+  ):
+    """bigquery.Client is created without a location parameter."""
+    with mock.patch.object(bigquery, "Client", autospec=True) as mock_bq_cls:
+      mock_bq_cls.return_value.get_table.side_effect = (
+          cloud_exceptions.NotFound("table")
+      )
+      mock_bq_cls.return_value.create_table.return_value = None
+
+      async with managed_plugin(
+          project_id=PROJECT_ID,
+          dataset_id=DATASET_ID,
+          table_id=TABLE_ID,
+          location="europe-west1",
+          config=bigquery_agent_analytics_plugin.BigQueryLoggerConfig(
+              create_views=False,
+          ),
+      ) as plugin:
+        await plugin._ensure_started()
+
+        mock_bq_cls.assert_called_once()
+        _, kwargs = mock_bq_cls.call_args
+        assert "location" not in kwargs
+
+  @pytest.mark.asyncio
+  async def test_view_query_omits_location(
+      self,
+      mock_auth_default,
+      mock_to_arrow_schema,
+      mock_asyncio_to_thread,
+  ):
+    """View creation DDL queries do not pass an explicit location."""
+    with mock.patch.object(bigquery, "Client", autospec=True) as mock_bq_cls:
+      mock_client = mock_bq_cls.return_value
+      mock_client.get_table.return_value = mock.MagicMock()
+      mock_client.query.return_value.result.return_value = None
+
+      async with managed_plugin(
+          project_id=PROJECT_ID,
+          dataset_id=DATASET_ID,
+          table_id=TABLE_ID,
+          config=bigquery_agent_analytics_plugin.BigQueryLoggerConfig(
+              create_views=True,
+          ),
+      ) as plugin:
+        await plugin._ensure_started()
+
+        assert mock_client.query.call_count > 0
+        for call in mock_client.query.call_args_list:
+          _, kwargs = call
+          # No explicit location — BQ infers from dataset
+          assert "location" not in kwargs
+
+  @pytest.mark.asyncio
+  async def test_view_error_still_logged(
+      self,
+      mock_auth_default,
+      mock_to_arrow_schema,
+      mock_asyncio_to_thread,
+  ):
+    """View creation errors are logged but not raised."""
+    with mock.patch.object(bigquery, "Client", autospec=True) as mock_bq_cls:
+      mock_client = mock_bq_cls.return_value
+      mock_client.get_table.return_value = mock.MagicMock()
+      mock_client.query.return_value.result.side_effect = Exception(
+          "view error"
+      )
+
+      # Should not raise
+      async with managed_plugin(
+          project_id=PROJECT_ID,
+          dataset_id=DATASET_ID,
+          table_id=TABLE_ID,
+          config=bigquery_agent_analytics_plugin.BigQueryLoggerConfig(
+              create_views=True,
+          ),
+      ) as plugin:
+        await plugin._ensure_started()
+        assert plugin._started

@@ -2184,7 +2184,6 @@ class BigQueryAgentAnalyticsPlugin(BasePlugin):
           self._executor,
           lambda: bigquery.Client(
               project=self.project_id,
-              location=self.location,
               credentials=self._credentials,
           ),
       )
